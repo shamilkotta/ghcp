@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { Effect, pipe } from "effect";
 
 type GitHubLink = {
@@ -43,6 +45,9 @@ type FileDownload = {
 };
 
 const defaultConcurrency = 8;
+const githubApiVersion = "2022-11-28";
+const execFileAsync = promisify(execFile);
+let githubTokenPromise: Promise<string | undefined> | undefined;
 
 const usage = `Usage:
   ghcp <github-url> [path]
@@ -231,7 +236,7 @@ async function collectFiles(
 async function downloadFile(link: ResolvedLink, targetPath: string): Promise<void> {
   await mkdir(dirname(targetPath), { recursive: true });
   console.log(`Downloading ${link.path}`);
-  await writeFile(targetPath, await fetchBuffer(rawUrl(link, link.path)));
+  await writeFile(targetPath, await fetchContentBytes(link, link.path));
 }
 
 async function downloadContentFile(
@@ -242,12 +247,13 @@ async function downloadContentFile(
   await mkdir(dirname(targetPath), { recursive: true });
   console.log(`Downloading ${file.path}`);
 
-  if (file.download_url) {
+  const token = await resolveGithubToken();
+  if (!token && file.download_url) {
     await writeFile(targetPath, await fetchBuffer(file.download_url));
     return;
   }
 
-  await writeFile(targetPath, await fetchBuffer(rawUrl(link, file.path)));
+  await writeFile(targetPath, await fetchContentBytes(link, file.path));
 }
 
 async function mapConcurrent<T>(
@@ -288,31 +294,31 @@ function getConcurrency(): number {
   return value;
 }
 
-function rawUrl(link: ResolvedLink, path: string): string {
-  return `https://raw.githubusercontent.com/${link.owner}/${link.repo}/${link.ref
-    .split("/")
-    .map(encodeURIComponent)
-    .join("/")}/${path.split("/").map(encodeURIComponent).join("/")}`;
-}
-
 async function fetchContents(
   link: ResolvedLink,
   path: string,
 ): Promise<GitHubContent | Array<GitHubContent>> {
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-  const url = `https://api.github.com/repos/${link.owner}/${link.repo}/contents/${encodedPath}?ref=${encodeURIComponent(
-    link.ref,
-  )}`;
-
-  return fetchJson<GitHubContent | Array<GitHubContent>>(url);
+  return fetchJson<GitHubContent | Array<GitHubContent>>(contentApiUrl(link, path), {
+    Accept: "application/vnd.github+json",
+  });
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchContentBytes(link: ResolvedLink, path: string): Promise<Buffer> {
+  return fetchBuffer(contentApiUrl(link, path), {
+    Accept: "application/vnd.github.raw+json",
+  });
+}
+
+function contentApiUrl(link: ResolvedLink, path: string): string {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return `https://api.github.com/repos/${link.owner}/${link.repo}/contents/${encodedPath}?ref=${encodeURIComponent(
+    link.ref,
+  )}`;
+}
+
+async function fetchJson<T>(url: string, headers: HeadersInit = {}): Promise<T> {
   const response = await fetch(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "ghcp",
-    },
+    headers: await requestHeaders(headers),
   });
 
   if (!response.ok) {
@@ -322,11 +328,9 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function fetchBuffer(url: string): Promise<Buffer> {
+async function fetchBuffer(url: string, headers: HeadersInit = {}): Promise<Buffer> {
   const response = await fetch(url, {
-    headers: {
-      "User-Agent": "ghcp",
-    },
+    headers: await requestHeaders(headers),
   });
 
   if (!response.ok) {
@@ -334,4 +338,33 @@ async function fetchBuffer(url: string): Promise<Buffer> {
   }
 
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function requestHeaders(headers: HeadersInit = {}): Promise<HeadersInit> {
+  const token = await resolveGithubToken();
+
+  return {
+    "User-Agent": "ghcp",
+    "X-GitHub-Api-Version": githubApiVersion,
+    ...headers,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+async function resolveGithubToken(): Promise<string | undefined> {
+  const envToken =
+    process.env.GHCP_GITHUB_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+
+  if (envToken) {
+    return envToken;
+  }
+
+  try {
+    const { stdout } = await execFileAsync("gh", ["auth", "token", "--hostname", "github.com"], {
+      timeout: 3_000,
+    });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
