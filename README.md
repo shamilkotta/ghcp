@@ -1,6 +1,6 @@
 # ghcp
 
-Download a file or folder from a public GitHub link into the current directory.
+Download a file or folder from a public GitHub link.
 
 ```sh
 pnpm install
@@ -8,13 +8,17 @@ pnpm build
 pnpm link --global
 
 ghcp https://github.com/shamilkotta/ghcp/tree/main/src
+ghcp https://github.com/shamilkotta/ghcp/tree/main/src ./downloaded-src
+ghcp https://github.com/shamilkotta/ghcp/tree/main/src .
+ghcp https://github.com/shamilkotta/ghcp/blob/main/package.json ./downloads
 ```
 
-Folder downloads run with up to 8 parallel file downloads by default. Set `GHCP_CONCURRENCY` to tune it:
+By default, folder downloads keep the GitHub folder name, so the first example writes to `./src`.
+Pass a destination path to write the folder contents there. Pass `.` to write the folder contents
+directly into the current directory.
 
-```sh
-GHCP_CONCURRENCY=16 ghcp https://github.com/shamilkotta/ghcp/tree/main/src
-```
+For file downloads, the destination path is always treated as a folder. The original GitHub file name
+is kept.
 
 Supported public links:
 

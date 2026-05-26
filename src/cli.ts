@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Effect, pipe } from "effect";
 
 type GitHubLink = {
@@ -45,11 +45,12 @@ type FileDownload = {
 const defaultConcurrency = 8;
 
 const usage = `Usage:
-  ghcp <github-url>
+  ghcp <github-url> [path]
 
 Examples:
   ghcp https://github.com/shamilkotta/ghcp/tree/main/src
-  ghcp https://github.com/shamilkotta/ghcp/blob/main/package.json`;
+  ghcp https://github.com/shamilkotta/ghcp/tree/main/src .
+  ghcp https://github.com/shamilkotta/ghcp/blob/main/package.json ./downloads`;
 
 const main = pipe(
   Effect.tryPromise(() => run(process.argv.slice(2))),
@@ -77,24 +78,48 @@ function errorMessage(error: unknown): string {
 
 async function run(args: ReadonlyArray<string>): Promise<void> {
   const url = args[0];
+  const destination = args[1];
 
   if (!url || args.includes("--help") || args.includes("-h")) {
     console.log(usage);
     return;
   }
 
+  if (args.length > 2) {
+    throw new GhcpError("expected at most a GitHub URL and destination path");
+  }
+
   const link = parseGitHubUrl(url);
   const resolved = await resolveRef(link);
-  const targetRoot = join(process.cwd(), basename(resolved.path) || resolved.repo);
 
   if (resolved.kind === "blob" || resolved.kind === "raw") {
-    await downloadFile(resolved, targetRoot);
-    console.log(`Downloaded ${resolved.path} -> ${targetRoot}`);
+    const targetPath = resolveFileTargetPath(resolved, destination);
+    await downloadFile(resolved, targetPath);
+    console.log(`Downloaded ${resolved.path} -> ${targetPath}`);
     return;
   }
 
-  await downloadDirectory(resolved, targetRoot, resolved.path, getConcurrency());
-  console.log(`Downloaded ${resolved.path} -> ${targetRoot}`);
+  const targetPath = resolveDirectoryTargetPath(resolved, destination);
+  await downloadDirectory(resolved, targetPath, resolved.path, getConcurrency());
+  console.log(`Downloaded ${resolved.path} -> ${targetPath}`);
+}
+
+function resolveDirectoryTargetPath(link: ResolvedLink, destination?: string): string {
+  if (destination) {
+    return resolve(process.cwd(), destination);
+  }
+
+  return join(process.cwd(), basename(link.path) || link.repo);
+}
+
+function resolveFileTargetPath(link: ResolvedLink, destination?: string): string {
+  const fileName = basename(link.path);
+
+  if (!destination) {
+    return join(process.cwd(), fileName);
+  }
+
+  return join(resolve(process.cwd(), destination), fileName);
 }
 
 function parseGitHubUrl(input: string): GitHubLink {
