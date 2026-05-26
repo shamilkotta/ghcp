@@ -2,11 +2,23 @@
 
 Download a file or folder from a GitHub link.
 
-```sh
-pnpm install
-pnpm build
-pnpm link --global
+## Install
 
+```sh
+pnpm add -g @shamilkotta/ghcp
+```
+
+Or run without installing:
+
+```sh
+pnpm dlx @shamilkotta/ghcp <github-url> [path]
+```
+
+Requires [Node.js](https://nodejs.org/) 20 or newer.
+
+## Usage
+
+```sh
 ghcp https://github.com/shamilkotta/ghcp/tree/main/src
 ghcp https://github.com/shamilkotta/ghcp/tree/main/src ./downloaded-src
 ghcp https://github.com/shamilkotta/ghcp/tree/main/src .
@@ -43,3 +55,27 @@ GHCP_GITHUB_TOKEN=github_pat_... ghcp https://github.com/owner/private-repo/tree
 
 For a fine-grained personal access token, grant `Contents` repository permission: `Read-only`
 for the target repository. For a classic personal access token, use the `repo` scope.
+
+## Development
+
+```sh
+git clone https://github.com/shamilkotta/ghcp.git
+cd ghcp
+pnpm install
+pnpm build
+pnpm link --global
+```
+
+## Publish
+
+From a clean checkout with `npm login` (or `pnpm login`) already done:
+
+```sh
+pnpm publish
+```
+
+`prepublishOnly` runs format, lint, and build before the tarball is uploaded.
+
+## License
+
+MIT

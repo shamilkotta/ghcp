@@ -1,21 +1,47 @@
 {
-  "name": "ghcp",
+  "name": "@shamilkotta/ghcp",
   "version": "0.1.0",
   "description": "Download a file or folder from a public GitHub link.",
+  "keywords": [
+    "cli",
+    "copy",
+    "download",
+    "fetch",
+    "github",
+    "github-cli",
+    "repository"
+  ],
+  "homepage": "https://github.com/shamilkotta/ghcp#readme",
+  "bugs": {
+    "url": "https://github.com/shamilkotta/ghcp/issues"
+  },
+  "license": "MIT",
+  "author": "shamilkotta",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shamilkotta/ghcp.git"
+  },
   "bin": {
     "ghcp": "./dist/cli.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "pnpm build && node dist/cli.mjs",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
-    "check": "pnpm format:check && pnpm lint && pnpm build"
+    "check": "pnpm format:check && pnpm lint && pnpm build",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm run check"
   },
   "dependencies": {
     "effect": "^3.21.2"

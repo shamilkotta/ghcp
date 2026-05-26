@@ -44,10 +44,11 @@ type FileDownload = {
   targetPath: string;
 };
 
+type FetchHeaders = Record<string, string>;
+
 const defaultConcurrency = 8;
 const githubApiVersion = "2022-11-28";
 const execFileAsync = promisify(execFile);
-let githubTokenPromise: Promise<string | undefined> | undefined;
 
 const usage = `Usage:
   ghcp <github-url> [path]
@@ -316,7 +317,7 @@ function contentApiUrl(link: ResolvedLink, path: string): string {
   )}`;
 }
 
-async function fetchJson<T>(url: string, headers: HeadersInit = {}): Promise<T> {
+async function fetchJson<T>(url: string, headers: FetchHeaders = {}): Promise<T> {
   const response = await fetch(url, {
     headers: await requestHeaders(headers),
   });
@@ -328,7 +329,7 @@ async function fetchJson<T>(url: string, headers: HeadersInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
-async function fetchBuffer(url: string, headers: HeadersInit = {}): Promise<Buffer> {
+async function fetchBuffer(url: string, headers: FetchHeaders = {}): Promise<Buffer> {
   const response = await fetch(url, {
     headers: await requestHeaders(headers),
   });
@@ -340,7 +341,7 @@ async function fetchBuffer(url: string, headers: HeadersInit = {}): Promise<Buff
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function requestHeaders(headers: HeadersInit = {}): Promise<HeadersInit> {
+async function requestHeaders(headers: FetchHeaders = {}): Promise<FetchHeaders> {
   const token = await resolveGithubToken();
 
   return {
