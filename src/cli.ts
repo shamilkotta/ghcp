@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { Effect, pipe } from "effect";
+import { Data, Effect, Option, pipe } from "effect";
 
 type GitHubLink = {
   owner: string;
@@ -35,8 +35,8 @@ type GitHubContent =
       download_url?: null;
     };
 
-class GhcpError extends Error {
-  override name = "GhcpError";
+class GhcpError extends Data.TaggedError("GhcpError")<{ message: string }> {
+  name = "GhcpError";
 }
 
 type FileDownload = {
@@ -58,19 +58,11 @@ Examples:
   ghcp https://github.com/shamilkotta/ghcp/tree/main/src .
   ghcp https://github.com/shamilkotta/ghcp/blob/main/package.json ./downloads`;
 
-const main = pipe(
-  Effect.tryPromise(() => run(process.argv.slice(2))),
-  Effect.catchAll((error) =>
-    Effect.sync(() => {
-      console.error(`ghcp: ${errorMessage(error)}`);
-      process.exitCode = 1;
-    }),
-  ),
-);
-
-Effect.runPromise(main);
-
 function errorMessage(error: unknown): string {
+  if (error instanceof GhcpError) {
+    return error.message;
+  }
+
   if (error instanceof Error && "error" in error) {
     return errorMessage(error.error);
   }
@@ -82,33 +74,37 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-async function run(args: ReadonlyArray<string>): Promise<void> {
-  const url = args[0];
-  const destination = args[1];
+const run = (args: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const url = args[0];
+    const destination = args[1];
 
-  if (!url || args.includes("--help") || args.includes("-h")) {
-    console.log(usage);
-    return;
-  }
+    if (!url || args.includes("--help") || args.includes("-h")) {
+      console.log(usage);
+      return yield* Effect.fail(new GhcpError({ message: "expected a GitHub URL" }));
+    }
 
-  if (args.length > 2) {
-    throw new GhcpError("expected at most a GitHub URL and destination path");
-  }
+    if (args.length > 2) {
+      return yield* Effect.fail(
+        new GhcpError({ message: "expected at most a GitHub URL and destination path" }),
+      );
+    }
 
-  const link = parseGitHubUrl(url);
-  const resolved = await resolveRef(link);
+    const link = yield* parseGitHubUrl(url);
+    const resolved = yield* resolveRef(link);
 
-  if (resolved.kind === "blob" || resolved.kind === "raw") {
-    const targetPath = resolveFileTargetPath(resolved, destination);
-    await downloadFile(resolved, targetPath);
+    if (resolved.kind === "blob" || resolved.kind === "raw") {
+      const targetPath = resolveFileTargetPath(resolved, destination);
+      yield* downloadFile(resolved, targetPath);
+      console.log(`Downloaded ${resolved.path} -> ${targetPath}`);
+      return;
+    }
+
+    const targetPath = resolveDirectoryTargetPath(resolved, destination);
+    const concurrency = yield* getConcurrency();
+    yield* downloadDirectory(resolved, targetPath, resolved.path, concurrency);
     console.log(`Downloaded ${resolved.path} -> ${targetPath}`);
-    return;
-  }
-
-  const targetPath = resolveDirectoryTargetPath(resolved, destination);
-  await downloadDirectory(resolved, targetPath, resolved.path, getConcurrency());
-  console.log(`Downloaded ${resolved.path} -> ${targetPath}`);
-}
+  });
 
 function resolveDirectoryTargetPath(link: ResolvedLink, destination?: string): string {
   if (destination) {
@@ -128,134 +124,181 @@ function resolveFileTargetPath(link: ResolvedLink, destination?: string): string
   return join(resolve(process.cwd(), destination), fileName);
 }
 
-function parseGitHubUrl(input: string): GitHubLink {
-  let url: URL;
+const parseGitHubUrl = (input: string) =>
+  Effect.gen(function* () {
+    let url: URL;
 
-  try {
-    url = new URL(input);
-  } catch {
-    throw new GhcpError("expected a GitHub URL");
-  }
-
-  const segments = url.pathname.split("/").filter(Boolean);
-
-  if (url.hostname === "github.com") {
-    const [owner, repo, kind, ...refAndPathSegments] = segments;
-
-    if (
-      !owner ||
-      !repo ||
-      (kind !== "tree" && kind !== "blob") ||
-      refAndPathSegments.length === 0
-    ) {
-      throw new GhcpError("expected a github.com tree or blob link");
+    try {
+      url = new URL(input);
+    } catch {
+      return yield* Effect.fail(new GhcpError({ message: "expected a GitHub URL" }));
     }
 
-    return {
-      owner,
-      repo: repo.replace(/\.git$/, ""),
-      kind,
-      refAndPathSegments,
-    };
-  }
+    const segments = url.pathname.split("/").filter(Boolean);
 
-  if (url.hostname === "raw.githubusercontent.com") {
-    const [owner, repo, ...refAndPathSegments] = segments;
+    if (url.hostname === "github.com") {
+      const [owner, repo, kind, ...refAndPathSegments] = segments;
 
-    if (!owner || !repo || refAndPathSegments.length === 0) {
-      throw new GhcpError("expected a raw.githubusercontent.com file link");
+      if (
+        !owner ||
+        !repo ||
+        (kind !== "tree" && kind !== "blob") ||
+        refAndPathSegments.length === 0
+      ) {
+        return yield* Effect.fail(
+          new GhcpError({ message: "expected a github.com tree or blob link" }),
+        );
+      }
+
+      return {
+        owner,
+        repo: repo.replace(/\.git$/, ""),
+        kind,
+        refAndPathSegments,
+      } as GitHubLink;
     }
 
+    if (url.hostname === "raw.githubusercontent.com") {
+      const [owner, repo, ...refAndPathSegments] = segments;
+
+      if (!owner || !repo || refAndPathSegments.length === 0) {
+        return yield* Effect.fail(
+          new GhcpError({ message: "expected a raw.githubusercontent.com file link" }),
+        );
+      }
+
+      return {
+        owner,
+        repo,
+        kind: "raw",
+        refAndPathSegments,
+      } as GitHubLink;
+    }
+
+    return yield* Effect.fail(
+      new GhcpError({
+        message: "only github.com and raw.githubusercontent.com links are supported",
+      }),
+    );
+  });
+
+const resolveRef = (link: GitHubLink) =>
+  Effect.gen(function* () {
+    const [ref, ...pathSegments] = link.refAndPathSegments;
+    if (!ref || pathSegments.length === 0) {
+      return yield* Effect.fail(
+        new GhcpError({ message: "expected a file or folder path after the branch or tag" }),
+      );
+    }
     return {
-      owner,
-      repo,
-      kind: "raw",
-      refAndPathSegments,
-    };
-  }
+      owner: link.owner,
+      repo: link.repo,
+      kind: link.kind,
+      ref,
+      path: pathSegments.join("/"),
+    } as ResolvedLink;
+  });
 
-  throw new GhcpError("only github.com and raw.githubusercontent.com links are supported");
-}
-
-async function resolveRef(link: GitHubLink): Promise<ResolvedLink> {
-  const [ref, ...pathSegments] = link.refAndPathSegments;
-
-  if (!ref || pathSegments.length === 0) {
-    throw new GhcpError("expected a file or folder path after the branch or tag");
-  }
-
-  return {
-    owner: link.owner,
-    repo: link.repo,
-    kind: link.kind,
-    ref,
-    path: pathSegments.join("/"),
-  };
-}
-
-async function downloadDirectory(
+const downloadDirectory = (
   link: ResolvedLink,
   targetRoot: string,
   currentPath: string,
   concurrency: number,
-): Promise<void> {
-  const files = await collectFiles(link, targetRoot, currentPath);
+) =>
+  Effect.gen(function* () {
+    const files = yield* collectFiles(link, targetRoot, currentPath);
 
-  await mkdir(targetRoot, { recursive: true });
-  await mapConcurrent(files, concurrency, ({ file, targetPath }) =>
-    downloadContentFile(link, file, targetPath),
-  );
-}
+    yield* Effect.tryPromise(() => mkdir(targetRoot, { recursive: true })).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to create directory for ${targetRoot}` })),
+      ),
+    );
+    yield* Effect.tryPromise(() =>
+      mapConcurrent(files, concurrency, ({ file, targetPath }) =>
+        Effect.runPromise(downloadContentFile(link, file, targetPath)),
+      ),
+    ).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to download directory for ${currentPath}` })),
+      ),
+    );
+  });
 
-async function collectFiles(
+const collectFiles = (
   link: ResolvedLink,
   targetRoot: string,
   currentPath: string,
-): Promise<Array<FileDownload>> {
-  const contents = await fetchContents(link, currentPath);
+): Effect.Effect<Array<FileDownload>, GhcpError> =>
+  Effect.gen(function* () {
+    const contents = yield* fetchContents(link, currentPath);
 
-  if (!Array.isArray(contents)) {
-    throw new GhcpError(`${currentPath} is not a folder`);
-  }
-
-  const files: Array<FileDownload> = [];
-  for (const item of contents) {
-    const relativePath = item.path.slice(link.path.length).replace(/^\/+/, "");
-    const targetPath = join(targetRoot, relativePath);
-
-    if (item.type === "dir") {
-      files.push(...(await collectFiles(link, targetRoot, item.path)));
-      continue;
+    if (!Array.isArray(contents)) {
+      return yield* Effect.fail(new GhcpError({ message: `${currentPath} is not a folder` }));
     }
 
-    files.push({ file: item, targetPath });
-  }
+    const files: Array<FileDownload> = [];
+    for (const item of contents) {
+      const relativePath = item.path.slice(link.path.length).replace(/^\/+/, "");
+      const targetPath = join(targetRoot, relativePath);
 
-  return files;
-}
+      if (item.type === "dir") {
+        files.push(...(yield* collectFiles(link, targetRoot, item.path)));
+        continue;
+      }
 
-async function downloadFile(link: ResolvedLink, targetPath: string): Promise<void> {
-  await mkdir(dirname(targetPath), { recursive: true });
-  console.log(`Downloading ${link.path}`);
-  await writeFile(targetPath, await fetchContentBytes(link, link.path));
-}
+      files.push({ file: item, targetPath });
+    }
 
-async function downloadContentFile(
+    return files;
+  });
+
+const downloadFile = (link: ResolvedLink, targetPath: string) =>
+  Effect.gen(function* () {
+    yield* Effect.tryPromise(() => mkdir(dirname(targetPath), { recursive: true })).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to create directory for ${targetPath}` })),
+      ),
+    );
+    console.log(`Downloading ${link.path}`);
+    const content = yield* fetchContentBytes(link, link.path);
+    yield* Effect.tryPromise(() => writeFile(targetPath, content)).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to write file for ${targetPath}` })),
+      ),
+    );
+  });
+
+const downloadContentFile = (
   link: ResolvedLink,
   file: GitHubContent & { type: "file" },
   targetPath: string,
-): Promise<void> {
-  await mkdir(dirname(targetPath), { recursive: true });
-  console.log(`Downloading ${file.path}`);
+) =>
+  Effect.gen(function* () {
+    yield* Effect.tryPromise(() => mkdir(dirname(targetPath), { recursive: true })).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to create directory for ${targetPath}` })),
+      ),
+    );
+    console.log(`Downloading ${file.path}`);
 
-  const token = await resolveGithubToken();
-  if (!token && file.download_url) {
-    await writeFile(targetPath, await fetchBuffer(file.download_url));
-    return;
-  }
+    const token = yield* resolveGithubToken;
+    if (!token && file.download_url) {
+      const buffer = yield* fetchBuffer(file.download_url);
+      yield* Effect.tryPromise(() => writeFile(targetPath, buffer)).pipe(
+        Effect.catchAll(() =>
+          Effect.fail(new GhcpError({ message: `failed to write file for ${targetPath}` })),
+        ),
+      );
+      return;
+    }
 
-  await writeFile(targetPath, await fetchContentBytes(link, file.path));
-}
+    const content = yield* fetchContentBytes(link, file.path);
+    yield* Effect.tryPromise(() => writeFile(targetPath, content)).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to write file for ${targetPath}` })),
+      ),
+    );
+  });
 
 async function mapConcurrent<T>(
   items: ReadonlyArray<T>,
@@ -279,36 +322,35 @@ async function mapConcurrent<T>(
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 }
 
-function getConcurrency(): number {
+function getConcurrency() {
   const rawValue = process.env.GHCP_CONCURRENCY;
 
   if (!rawValue) {
-    return defaultConcurrency;
+    return Effect.succeed(defaultConcurrency);
   }
 
   const value = Number(rawValue);
 
   if (!Number.isInteger(value) || value < 1) {
-    throw new GhcpError("GHCP_CONCURRENCY must be a positive integer");
+    return Effect.fail(new GhcpError({ message: "GHCP_CONCURRENCY must be a positive integer" }));
   }
 
-  return value;
+  return Effect.succeed(value);
 }
 
-async function fetchContents(
-  link: ResolvedLink,
-  path: string,
-): Promise<GitHubContent | Array<GitHubContent>> {
-  return fetchJson<GitHubContent | Array<GitHubContent>>(contentApiUrl(link, path), {
+function fetchContents(link: ResolvedLink, path: string) {
+  const url = contentApiUrl(link, path);
+  return fetchJson<GitHubContent | Array<GitHubContent>>(url, {
     Accept: "application/vnd.github+json",
   });
 }
 
-async function fetchContentBytes(link: ResolvedLink, path: string): Promise<Buffer> {
-  return fetchBuffer(contentApiUrl(link, path), {
+const fetchContentBytes = (link: ResolvedLink, path: string) => {
+  const url = contentApiUrl(link, path);
+  return fetchBuffer(url, {
     Accept: "application/vnd.github.raw+json",
   });
-}
+};
 
 function contentApiUrl(link: ResolvedLink, path: string): string {
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
@@ -317,55 +359,94 @@ function contentApiUrl(link: ResolvedLink, path: string): string {
   )}`;
 }
 
-async function fetchJson<T>(url: string, headers: FetchHeaders = {}): Promise<T> {
-  const response = await fetch(url, {
-    headers: await requestHeaders(headers),
+const fetchJson = <T>(url: string, headers: FetchHeaders = {}) =>
+  Effect.gen(function* () {
+    const reqHeaders = yield* requestHeaders(headers);
+    const response = yield* Effect.tryPromise(() => fetch(url, { headers: reqHeaders })).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `GitHub request failed for ${url}` })),
+      ),
+    );
+
+    if (!response.ok) {
+      return yield* Effect.fail(
+        new GhcpError({ message: `GitHub request failed (${response.status}) for ${url}` }),
+      );
+    }
+
+    return yield* Effect.tryPromise(() => response.json()).pipe(
+      Effect.map((json) => json as T),
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to parse response for ${url}` })),
+      ),
+    );
   });
 
-  if (!response.ok) {
-    throw new GhcpError(`GitHub request failed (${response.status}) for ${url}`);
-  }
+const fetchBuffer = (url: string, headers: FetchHeaders = {}) =>
+  Effect.gen(function* () {
+    const reqHeaders = yield* requestHeaders(headers);
+    const response = yield* Effect.tryPromise(() => fetch(url, { headers: reqHeaders })).pipe(
+      Effect.catchAll(() => Effect.fail(new GhcpError({ message: `download failed for ${url}` }))),
+    );
 
-  return (await response.json()) as T;
-}
+    if (!response.ok) {
+      return yield* Effect.fail(
+        new GhcpError({ message: `download failed (${response.status}) for ${url}` }),
+      );
+    }
 
-async function fetchBuffer(url: string, headers: FetchHeaders = {}): Promise<Buffer> {
-  const response = await fetch(url, {
-    headers: await requestHeaders(headers),
+    return yield* Effect.tryPromise(() => response.arrayBuffer()).pipe(
+      Effect.map((arrayBuffer) => Buffer.from(arrayBuffer)),
+      Effect.catchAll(() =>
+        Effect.fail(new GhcpError({ message: `failed to read response for ${url}` })),
+      ),
+    );
   });
 
-  if (!response.ok) {
-    throw new GhcpError(`download failed (${response.status}) for ${url}`);
-  }
+const requestHeaders = (headers: FetchHeaders = {}) =>
+  Effect.gen(function* () {
+    const token = yield* resolveGithubToken;
 
-  return Buffer.from(await response.arrayBuffer());
-}
+    return {
+      "User-Agent": "ghcp",
+      "X-GitHub-Api-Version": githubApiVersion,
+      ...headers,
+      ...(Option.isSome(token) ? { Authorization: `Bearer ${token.value}` } : {}),
+    };
+  });
 
-async function requestHeaders(headers: FetchHeaders = {}): Promise<FetchHeaders> {
-  const token = await resolveGithubToken();
-
-  return {
-    "User-Agent": "ghcp",
-    "X-GitHub-Api-Version": githubApiVersion,
-    ...headers,
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
-
-async function resolveGithubToken(): Promise<string | undefined> {
+const resolveGithubToken = Effect.gen(function* () {
   const envToken =
     process.env.GHCP_GITHUB_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
 
   if (envToken) {
-    return envToken;
+    return yield* Effect.succeed(Option.some(envToken));
   }
 
-  try {
-    const { stdout } = await execFileAsync("gh", ["auth", "token", "--hostname", "github.com"], {
+  return yield* Effect.tryPromise(() =>
+    execFileAsync("gh", ["auth", "token", "--hostname", "github.com"], {
       timeout: 3_000,
-    });
-    return stdout.trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
+    }),
+  ).pipe(
+    Effect.map((result) => Option.fromNullable(result?.stdout.trim())),
+    Effect.catchAll(() => Effect.succeed(Option.none())),
+  );
+});
+
+const main = pipe(
+  run(process.argv.slice(2)),
+  Effect.catchTag("GhcpError", (error) =>
+    Effect.sync(() => {
+      console.error(`ghcp: ${error.message}`);
+      process.exitCode = 1;
+    }),
+  ),
+  Effect.catchAll((error) =>
+    Effect.sync(() => {
+      console.error(`ghcp: ${errorMessage(error)}`);
+      process.exitCode = 1;
+    }),
+  ),
+);
+
+Effect.runPromise(main);
